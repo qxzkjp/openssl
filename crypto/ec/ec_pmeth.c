@@ -533,7 +533,6 @@ static int pkey_ec_keygen(EVP_PKEY_CTX *ctx, EVP_PKEY *pkey)
 }
 
 int pkey_ec_asym_encrypt_init(EVP_PKEY_CTX *ctx) {
-    printf("Inside pkey_ec_asym_encrypt_init\n");
 	EC_PKEY_CTX *dctx = ctx->data;
 	EC_GROUP *group = dctx->gen_group;
 	EC_KEY *ec_peerkey = EC_KEY_new();
@@ -549,19 +548,16 @@ int pkey_ec_asym_encrypt_init(EVP_PKEY_CTX *ctx) {
 	int ret = 1;
 
     if (EVP_PKEY_derive_init(ctx) <= 0) {
-        printf("Failed to initialise context\n");
 		ret = 0;
 		goto cleanup;
 	}
 
 	if (!ec_peerkey) {
-        printf("Failed to init peer key\n");
 		ret = 0;
 		goto cleanup;
 	}
 
 	if (!EVP_PKEY_assign_EC_KEY(peerkey, ec_peerkey)) {
-        printf("Failed to assign peer key to EVP\n");
         EC_KEY_free(ec_peerkey);
 		ret = 0;
 		goto cleanup;
@@ -573,64 +569,64 @@ int pkey_ec_asym_encrypt_init(EVP_PKEY_CTX *ctx) {
         ret = EC_KEY_set_group(ec_peerkey, dctx->gen_group);
 
     if (!EC_KEY_generate_key(ec_peerkey)) {
-        printf("Failed to generate peer key\n");
 		ret = 0;
 		goto cleanup;
 	}
 
     if (EVP_PKEY_derive_set_peer(ctx, peerkey) <= 0) {
-        printf("Failed to set peer key in context\n");
 		ret = 0;
 		goto cleanup;
 	}
 
+    ctx->operation = EVP_PKEY_OP_ENCRYPT;
+
 	cleanup:
 	// EVP_PKEY_free(peerkey);
-    printf("pkey_ec_asym_encrypt_init return value: %d\n", ret);
 	return ret;
 }
 
-int pkey_ec_asym_encrypt(EVP_PKEY_CTX *ctx, unsigned char* out, size_t *outlen, unsigned char *in, size_t inlen) {
-    printf("Inside pkey_ec_asym_encrypt\n");
-	EC_PKEY_CTX *dctx = ctx->data;
-	EVP_PKEY *tmp;
-	int bufSz;
+int pkey_ec_asym_encrypt(EVP_PKEY_CTX *ctx,
+                     unsigned char *out, size_t *outlen,
+                     const unsigned char *in, size_t inlen) {
+	EC_PKEY_CTX *dctx = NULL;
+	EVP_PKEY *tmp = NULL;
+	int bufSz = 0;
 	unsigned char *buf = NULL;
 	int rv = 0;
-	char *derived;
-	size_t *derivedlen;
-	
-	*derivedlen = inlen;
+	char *derived = NULL;
+	size_t derivedlen = 0;
+    
+    dctx = ctx->data;
+	derivedlen = inlen;
 	dctx->kdf_outlen = inlen;
 	derived = OPENSSL_malloc(inlen);
 	bufSz = i2d_PublicKey(ctx->peerkey, &buf);
-
+    
 	/* Do a switcharoo here so that the peer key's private key is used */
 	tmp = ctx->pkey;
 	ctx->pkey = ctx->peerkey;
 	ctx->peerkey = tmp;
-	if (!pkey_ec_kdf_derive(ctx, derived, derivedlen)) {
+	if (!pkey_ec_kdf_derive(ctx, derived, &derivedlen)) {
 		rv = 0;
 		goto cleanup;
 	}
 
-	if (*derivedlen != inlen) {
+	if (derivedlen != inlen) {
 		rv = 0;
 		goto cleanup;
 	}
 
-	if (*derivedlen + inlen > *outlen) {
+	if (derivedlen + inlen > *outlen) {
 		rv = 0;
 		goto cleanup;
 	}
 
-	*outlen = *derivedlen + inlen;
+	*outlen = derivedlen + inlen;
 
 	// encrypt given payload
 	memxor(derived, in, inlen);
-
 	memcpy(out, buf, bufSz);
-	memcpy(out + bufSz, derived, *derivedlen);
+	memcpy(out + bufSz, derived, derivedlen);
 
 	rv = 1;
 
