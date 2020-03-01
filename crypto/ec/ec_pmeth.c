@@ -539,13 +539,17 @@ int pkey_ec_asym_encrypt_init(EVP_PKEY_CTX *ctx) {
 	EVP_PKEY* peerkey = EVP_PKEY_new();
 	int bufSz;
 	char *buf;
+    int ret = 1;
 
 	dctx->kdf_type = EVP_PKEY_ECDH_KDF_X9_63;
 	dctx->kdf_md = EVP_sha256();
 	dctx->kdf_outlen = 32;
-	
 
-	int ret = 1;
+    if (ctx->pkey == NULL && dctx->gen_group == NULL) {
+        ECerr(EC_F_PKEY_EC_KEYGEN, EC_R_NO_PARAMETERS_SET);
+        ret = 0;
+        goto cleanup;
+    }
 
     if (EVP_PKEY_derive_init(ctx) <= 0) {
 		ret = 0;
@@ -581,7 +585,8 @@ int pkey_ec_asym_encrypt_init(EVP_PKEY_CTX *ctx) {
     ctx->operation = EVP_PKEY_OP_ENCRYPT;
 
 	cleanup:
-	// EVP_PKEY_free(peerkey);
+    //EVP_PKEY_CTX has a copy of this key, so it's OK to delete the original
+	EVP_PKEY_free(peerkey);
 	return ret;
 }
 
