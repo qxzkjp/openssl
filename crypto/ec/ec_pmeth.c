@@ -44,6 +44,95 @@ typedef struct {
     size_t kdf_outlen;
 } EC_PKEY_CTX;
 
+const int block_sizes[4] = {
+	sizeof(long long int),
+	sizeof(int),
+	sizeof(short int),
+	1 //sizeof(char)
+};
+
+void memxor(void* dst, void* src, size_t n) {
+	unsigned char *dst_c, *src_c;
+	short int     *dst_s, *src_s;
+	int           *dst_i, *src_i;
+	long long int *dst_ll, *src_ll;
+	size_t remaining;
+
+	dst_c     = dst;
+	src_c     = src;
+	remaining = n;
+
+	for (size_t i = 0; i < sizeof(block_sizes); ++i) {
+		int block_size = block_sizes[i];
+		int dst_offset = (uintptr_t)dst % block_size;
+		int src_offset = (uintptr_t)src % block_size;
+		size_t blocks;
+		size_t remainder;
+		
+		if (dst_offset != src_offset) {
+			continue;
+		}
+
+		for (int j = 0; j < dst_offset; ++j) {
+			dst_c[j] ^= src_c[j];
+		}
+
+		remaining -= dst_offset;
+
+		blocks = remaining / block_size;
+		remainder = remaining % block_size;
+
+		switch (block_sizes[i]) {
+				case sizeof(long long int):
+					dst_ll = (long long int*)(dst_c + dst_offset);
+					src_ll = (long long int*)(src_c + dst_offset);
+				break;
+				case sizeof(int):
+					dst_i = (int*)(dst_c + dst_offset);
+					src_i = (int*)(src_c + dst_offset);
+				break;
+				case sizeof(short):
+					dst_s = (short int*)(dst_c + dst_offset);
+					src_s = (short int*)(src_c + dst_offset);
+				break;
+				case 1:
+					dst_c += dst_offset;
+					src_c += dst_offset;
+				break;
+				default:
+				exit(1);
+			}
+
+		for (size_t j = 0; j < blocks; ++j) {
+			switch (block_size) {
+				case sizeof(long long int):
+					dst_ll[j] ^= src_ll[j];
+				break;
+				case sizeof(int):
+					dst_i[j] ^= src_i[j];
+				break;
+				case sizeof(short):
+					dst_s[j] ^= src_s[j];
+				break;
+				case 1:
+					dst_c[j] ^= src_c[j];
+				break;
+				default:
+				exit(1);
+			}
+		}
+
+		dst_c = (char*)dst + (remaining - remainder);
+		src_c = (char*)src + (remaining - remainder);
+
+		for (size_t j = 0; j < remainder; ++j) {
+			dst_c[j] ^= src_c[j];
+		}
+
+		break;
+	}
+}
+
 static int pkey_ec_init(EVP_PKEY_CTX *ctx)
 {
     EC_PKEY_CTX *dctx;
@@ -443,6 +532,119 @@ static int pkey_ec_keygen(EVP_PKEY_CTX *ctx, EVP_PKEY *pkey)
     return ret ? EC_KEY_generate_key(ec) : 0;
 }
 
+int pkey_ec_asym_encrypt_init(EVP_PKEY_CTX *ctx) {
+    printf("Inside pkey_ec_asym_encrypt_init\n");
+	EC_PKEY_CTX *dctx = ctx->data;
+	EC_GROUP *group = dctx->gen_group;
+	EC_KEY *ec_peerkey = EC_KEY_new();
+	EVP_PKEY* peerkey = EVP_PKEY_new();
+	int bufSz;
+	char *buf;
+
+	dctx->kdf_type = EVP_PKEY_ECDH_KDF_X9_63;
+	dctx->kdf_md = EVP_sha256();
+	dctx->kdf_outlen = 32;
+	
+
+	int ret = 1;
+
+    if (EVP_PKEY_derive_init(ctx) <= 0) {
+        printf("Failed to initialise context\n");
+		ret = 0;
+		goto cleanup;
+	}
+
+	if (!ec_peerkey) {
+        printf("Failed to init peer key\n");
+		ret = 0;
+		goto cleanup;
+	}
+
+	if (!EVP_PKEY_assign_EC_KEY(peerkey, ec_peerkey)) {
+        printf("Failed to assign peer key to EVP\n");
+        EC_KEY_free(ec_peerkey);
+		ret = 0;
+		goto cleanup;
+	}
+
+    if (ctx->pkey != NULL)
+        ret = EVP_PKEY_copy_parameters(peerkey, ctx->pkey);
+    else
+        ret = EC_KEY_set_group(ec_peerkey, dctx->gen_group);
+
+    if (!EC_KEY_generate_key(ec_peerkey)) {
+        printf("Failed to generate peer key\n");
+		ret = 0;
+		goto cleanup;
+	}
+
+    if (EVP_PKEY_derive_set_peer(ctx, peerkey) <= 0) {
+        printf("Failed to set peer key in context\n");
+		ret = 0;
+		goto cleanup;
+	}
+
+	cleanup:
+	// EVP_PKEY_free(peerkey);
+    printf("pkey_ec_asym_encrypt_init return value: %d\n", ret);
+	return ret;
+}
+
+int pkey_ec_asym_encrypt(EVP_PKEY_CTX *ctx, unsigned char* out, size_t *outlen, unsigned char *in, size_t inlen) {
+    printf("Inside pkey_ec_asym_encrypt\n");
+	EC_PKEY_CTX *dctx = ctx->data;
+	EVP_PKEY *tmp;
+	int bufSz;
+	unsigned char *buf = NULL;
+	int rv = 0;
+	char *derived;
+	size_t *derivedlen;
+	
+	*derivedlen = inlen;
+	dctx->kdf_outlen = inlen;
+	derived = OPENSSL_malloc(inlen);
+	bufSz = i2d_PublicKey(ctx->peerkey, &buf);
+
+	/* Do a switcharoo here so that the peer key's private key is used */
+	tmp = ctx->pkey;
+	ctx->pkey = ctx->peerkey;
+	ctx->peerkey = tmp;
+	if (!pkey_ec_kdf_derive(ctx, derived, derivedlen)) {
+		rv = 0;
+		goto cleanup;
+	}
+
+	if (*derivedlen != inlen) {
+		rv = 0;
+		goto cleanup;
+	}
+
+	if (*derivedlen + inlen > *outlen) {
+		rv = 0;
+		goto cleanup;
+	}
+
+	*outlen = *derivedlen + inlen;
+
+	// encrypt given payload
+	memxor(derived, in, inlen);
+
+	memcpy(out, buf, bufSz);
+	memcpy(out + bufSz, derived, *derivedlen);
+
+	rv = 1;
+
+	cleanup:
+	OPENSSL_free(derived);
+	OPENSSL_free(buf);
+    /* undo switcharoo */
+	tmp = ctx->pkey;
+	ctx->pkey = ctx->peerkey;
+	ctx->peerkey = tmp;
+
+	return rv;
+}
+
 static const EVP_PKEY_METHOD ec_pkey_meth = {
     EVP_PKEY_EC,
     0,
@@ -466,8 +668,8 @@ static const EVP_PKEY_METHOD ec_pkey_meth = {
 
     0, 0, 0, 0,
 
-    0,
-    0,
+    pkey_ec_asym_encrypt_init,
+    pkey_ec_asym_encrypt,
 
     0,
     0,
