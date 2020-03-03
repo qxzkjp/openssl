@@ -607,7 +607,6 @@ int pkey_ec_asym_encrypt(EVP_PKEY_CTX *ctx,
 	unsigned char *derived = NULL;
 	size_t derivedlen = 0;
     int hmac_keylen = 32;
-    // const char *hash_alg = "SHA256";
     int hashlen = 0;
     size_t actual_hashlen = 0;
     EVP_MAC *hmac = NULL;
@@ -728,14 +727,40 @@ int pkey_ec_asym_decrypt(EVP_PKEY_CTX *ctx,
     int ret = 0;
     EVP_PKEY *peerkey = NULL;
     EVP_PKEY *tmp = NULL;
-    unsigned char *derived = NULL;
-    size_t derivedlen = 0;
     EC_PKEY_CTX *dctx = ctx->data;
+    EVP_MAC *hmac = NULL;
+    EVP_MAC_CTX *hmac_ctx = NULL;
+    OSSL_PARAM params[3], *p = params;
+    unsigned char *derived = NULL;
+    unsigned char* md;
+    size_t derivedlen = 0;
     int hmac_keylen = 32;
-    unsigned char md[EVP_MAX_MD_SIZE];
-    unsigned int md_len = 0;
-    const EVP_MD *hash = EVP_sha256();
-    int hashlen = EVP_MD_size(hash);
+    size_t md_len = 0;
+    int hashlen = 0;
+
+    hmac = EVP_MAC_fetch(NULL, "HMAC", NULL);
+	derivedlen = inlen + hmac_keylen;
+	dctx->kdf_outlen = derivedlen;
+	derived = OPENSSL_malloc(derivedlen);
+
+    if (!hmac) {
+        ECerr(EC_F_PKEY_EC_ENCRYPT, EC_R_INVALID_DIGEST_TYPE);
+        ret = 0;
+        goto cleanup;
+    }
+
+    hmac_ctx = EVP_MAC_CTX_new(hmac);
+
+    // we have to set parameters before we can get the MAC size
+    // the key we set here is a dummy, because we need the MAC size before we can generate the real key
+    *p++ = OSSL_PARAM_construct_utf8_string(OSSL_MAC_PARAM_DIGEST, "SHA256", 0);
+    *p++ = OSSL_PARAM_construct_octet_string(OSSL_MAC_PARAM_KEY, "dummy", 5);
+    *p = OSSL_PARAM_construct_end();
+    EVP_MAC_CTX_set_params(hmac_ctx, params);
+    p = params;
+
+    hashlen = EVP_MAC_size(hmac_ctx);
+    md = OPENSSL_malloc(hashlen);
 
     if (ctx->pkey == NULL) {
         ECerr(EC_F_PKEY_EC_DECRYPT, EC_R_NO_PARAMETERS_SET);
@@ -791,7 +816,16 @@ int pkey_ec_asym_decrypt(EVP_PKEY_CTX *ctx,
     // decrypt data
     memcpy(out, in, *outlen);
     memxor(out, derived, *outlen);
-    HMAC(hash, derived + *outlen, hmac_keylen, out, *outlen, md, &md_len);
+
+    //Now we set the real MAC parameters
+    *p++ = OSSL_PARAM_construct_utf8_string(OSSL_MAC_PARAM_DIGEST, "SHA256", 0);
+    *p++ = OSSL_PARAM_construct_octet_string(OSSL_MAC_PARAM_KEY, derived + *outlen, hmac_keylen);
+    *p = OSSL_PARAM_construct_end();
+    EVP_MAC_CTX_set_params(hmac_ctx, params);
+    // calculate HMAC of plaintext, placing it directly into the output buffer
+    EVP_MAC_init(hmac_ctx);
+    EVP_MAC_update(hmac_ctx, out, *outlen);
+    EVP_MAC_final(hmac_ctx, md, &md_len, hashlen);
 
     OPENSSL_assert(md_len == hashlen);
 
@@ -812,11 +846,16 @@ int pkey_ec_asym_decrypt(EVP_PKEY_CTX *ctx,
         ctx->pkey = ctx->peerkey;
         ctx->peerkey = tmp;
     }
+    if (hmac)
+        EVP_MAC_free(hmac); 
+    if (hmac_ctx)
+        EVP_MAC_CTX_free(hmac_ctx);
     if (derived)
         OPENSSL_free(derived);
     if (peerkey)
         EVP_PKEY_free(peerkey);
-    
+    if (md)
+        OPENSSL_free(md);
     return ret;
 }
 
