@@ -21,6 +21,8 @@
 #include "ec_local.h"
 #include <openssl/evp.h>
 #include "crypto/evp.h"
+#include <openssl/hmac.h>
+#include <openssl/crypto.h>
 
 /* EC pkey context structure */
 
@@ -51,12 +53,18 @@ const int block_sizes[4] = {
 	1 //sizeof(char)
 };
 
-void memxor(void* dst, void* src, size_t n) {
-	unsigned char *dst_c, *src_c;
-	short int     *dst_s, *src_s;
-	int           *dst_i, *src_i;
-	long long int *dst_ll, *src_ll;
-	size_t remaining;
+void memxor(void* dst, const void* src, size_t n) {
+    unsigned char *dst_c;
+    short int *dst_s;
+    int *dst_i;
+    long long int *dst_ll;
+
+    const unsigned char *src_c;
+    const short int *src_s;
+    const int *src_i;
+    const long long int *src_ll;
+
+    size_t remaining;
 
 	dst_c     = dst;
 	src_c     = src;
@@ -122,8 +130,8 @@ void memxor(void* dst, void* src, size_t n) {
 			}
 		}
 
-		dst_c = (char*)dst + (remaining - remainder);
-		src_c = (char*)src + (remaining - remainder);
+		dst_c = (unsigned char*)dst + (remaining - remainder);
+		src_c = (unsigned char*)src + (remaining - remainder);
 
 		for (size_t j = 0; j < remainder; ++j) {
 			dst_c[j] ^= src_c[j];
@@ -534,11 +542,8 @@ static int pkey_ec_keygen(EVP_PKEY_CTX *ctx, EVP_PKEY *pkey)
 
 int pkey_ec_asym_encrypt_init(EVP_PKEY_CTX *ctx) {
 	EC_PKEY_CTX *dctx = ctx->data;
-	EC_GROUP *group = dctx->gen_group;
 	EC_KEY *ec_peerkey = EC_KEY_new();
 	EVP_PKEY* peerkey = EVP_PKEY_new();
-	int bufSz;
-	char *buf;
     int ret = 1;
 
     if (ctx->pkey == NULL && dctx->gen_group == NULL) {
@@ -600,8 +605,13 @@ int pkey_ec_asym_encrypt(EVP_PKEY_CTX *ctx,
 	int rv = 0;
 	unsigned char *derived = NULL;
 	size_t derivedlen = 0;
+    int hmac_keylen = 32;
+    int hashlen = 0;
+    unsigned int actual_hashlen = 0;
+    const EVP_MD *hash = EVP_sha256();
 
-	derivedlen = inlen;
+    hashlen = EVP_MD_size(hash);
+	derivedlen = inlen + hmac_keylen;
 	dctx->kdf_outlen = derivedlen;
 	derived = OPENSSL_malloc(derivedlen);
 	bufSz = i2d_PublicKey(ctx->peerkey, &buf);
@@ -611,6 +621,12 @@ int pkey_ec_asym_encrypt(EVP_PKEY_CTX *ctx,
         rv = 0;
         goto cleanup;
     }
+
+    if (bufSz + inlen + EVP_MAX_MD_SIZE > *outlen) {
+        ECerr(EC_F_PKEY_EC_DECRYPT, EC_R_BUFFER_TOO_SMALL);
+		rv = 0;
+		goto cleanup;
+	}
     
 	/* Do a switcharoo here so that the peer key's private key is used */
 	tmp = ctx->pkey;
@@ -621,22 +637,20 @@ int pkey_ec_asym_encrypt(EVP_PKEY_CTX *ctx,
 		goto cleanup;
 	}
 
-	if (derivedlen != inlen) {
+	if (derivedlen != inlen + hmac_keylen) {
 		rv = 0;
 		goto cleanup;
 	}
 
-	if (derivedlen + inlen > *outlen) {
-		rv = 0;
-		goto cleanup;
-	}
-
-	*outlen = bufSz + inlen;
+	*outlen = bufSz + inlen + hashlen;
 
 	// encrypt given payload
 	memxor(derived, in, inlen);
-	memcpy(out, buf, bufSz);
-	memcpy(out + bufSz, derived, derivedlen);
+    memcpy(out, buf, bufSz);
+	memcpy(out + bufSz, derived, inlen);
+    //calculate HMAC of plaintext, placing it directly into the output buffer
+    HMAC(hash, derived + inlen, hmac_keylen, in, inlen, out + bufSz + inlen, &actual_hashlen);
+    OPENSSL_assert(hashlen == actual_hashlen);
 
 	rv = 1;
 
@@ -653,8 +667,6 @@ int pkey_ec_asym_encrypt(EVP_PKEY_CTX *ctx,
 
 int pkey_ec_asym_decrypt_init(EVP_PKEY_CTX *ctx) {
 	EC_PKEY_CTX *dctx = ctx->data;
-	int bufSz;
-	char *buf;
     int rv = 1;
 
     if (EVP_PKEY_derive_init(ctx) <= 0) {
@@ -675,13 +687,18 @@ int pkey_ec_asym_decrypt_init(EVP_PKEY_CTX *ctx) {
 int pkey_ec_asym_decrypt(EVP_PKEY_CTX *ctx,
                      unsigned char *out, size_t *outlen,
                      const unsigned char *in, size_t inlen) {
-    int rv = 1;
+    int rv = 0;
     EVP_PKEY *peerkey = NULL;
     EVP_PKEY *tmp = NULL;
     unsigned char *derived = NULL;
     size_t derivedlen = 0;
-
     EC_PKEY_CTX *dctx = ctx->data;
+    int hmac_keylen = 32;
+    unsigned char md[EVP_MAX_MD_SIZE];
+    unsigned int md_len = 0;
+    const EVP_MD *hash = EVP_sha256();
+    int hashlen = EVP_MD_size(hash);
+
     if (ctx->pkey == NULL) {
         ECerr(EC_F_PKEY_EC_DECRYPT, EC_R_NO_PARAMETERS_SET);
         rv = 0;
@@ -704,13 +721,13 @@ int pkey_ec_asym_decrypt(EVP_PKEY_CTX *ctx,
     dctx->kdf_outlen = derivedlen;
     derived = OPENSSL_malloc(derivedlen);
 
-    if (*outlen < derivedlen) {
+    if (*outlen < derivedlen - hashlen) {
         ECerr(EC_F_PKEY_EC_DECRYPT, EC_R_BUFFER_TOO_SMALL);
         rv = 0;
         goto cleanup;
     }
 
-    *outlen = derivedlen;
+    *outlen = derivedlen - hashlen;
 
     if (EVP_PKEY_derive_set_peer(ctx, peerkey) <= 0) {
 		rv = 0;
@@ -727,15 +744,28 @@ int pkey_ec_asym_decrypt(EVP_PKEY_CTX *ctx,
 		goto cleanup;
 	}
 
-    if (derivedlen != *outlen) {
+    if (derivedlen != *outlen + hmac_keylen) {
         ECerr(EC_F_PKEY_EC_DECRYPT, EC_R_SHARED_INFO_ERROR);
         rv = 0;
         goto cleanup;
     }
 
     // decrypt data
-    memcpy(out, in, derivedlen);
-    memxor(out, derived, derivedlen);
+    memcpy(out, in, *outlen);
+    memxor(out, derived, *outlen);
+    HMAC(hash, derived + *outlen, hmac_keylen, out, *outlen, md, &md_len);
+
+    OPENSSL_assert(md_len == hashlen);
+
+    if (CRYPTO_memcmp(in + *outlen, md, hashlen) != 0)
+    {
+        ECerr(EC_F_PKEY_EC_DECRYPT, EC_R_INVALID_DIGEST);
+        memset(out, 0, *outlen);
+        rv = 0;
+        goto cleanup;
+    }
+
+    rv = 1;
 
     cleanup:
     if (tmp) {
