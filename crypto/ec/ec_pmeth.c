@@ -541,12 +541,8 @@ int pkey_ec_asym_encrypt_init(EVP_PKEY_CTX *ctx) {
 	char *buf;
     int ret = 1;
 
-	dctx->kdf_type = EVP_PKEY_ECDH_KDF_X9_63;
-	dctx->kdf_md = EVP_sha256();
-	dctx->kdf_outlen = 32;
-
     if (ctx->pkey == NULL && dctx->gen_group == NULL) {
-        ECerr(EC_F_PKEY_EC_KEYGEN, EC_R_NO_PARAMETERS_SET);
+        ECerr(EC_F_PKEY_EC_ENCRYPT, EC_R_NO_PARAMETERS_SET);
         ret = 0;
         goto cleanup;
     }
@@ -555,6 +551,10 @@ int pkey_ec_asym_encrypt_init(EVP_PKEY_CTX *ctx) {
 		ret = 0;
 		goto cleanup;
 	}
+
+    dctx->kdf_type = EVP_PKEY_ECDH_KDF_X9_63;
+	dctx->kdf_md = EVP_sha256();
+	dctx->kdf_outlen = 32;
 
 	if (!ec_peerkey) {
 		ret = 0;
@@ -593,19 +593,24 @@ int pkey_ec_asym_encrypt_init(EVP_PKEY_CTX *ctx) {
 int pkey_ec_asym_encrypt(EVP_PKEY_CTX *ctx,
                      unsigned char *out, size_t *outlen,
                      const unsigned char *in, size_t inlen) {
-	EC_PKEY_CTX *dctx = NULL;
+	EC_PKEY_CTX *dctx = ctx->data;
 	EVP_PKEY *tmp = NULL;
 	int bufSz = 0;
 	unsigned char *buf = NULL;
 	int rv = 0;
-	char *derived = NULL;
+	unsigned char *derived = NULL;
 	size_t derivedlen = 0;
-    
-    dctx = ctx->data;
+
 	derivedlen = inlen;
-	dctx->kdf_outlen = inlen;
-	derived = OPENSSL_malloc(inlen);
+	dctx->kdf_outlen = derivedlen;
+	derived = OPENSSL_malloc(derivedlen);
 	bufSz = i2d_PublicKey(ctx->peerkey, &buf);
+
+    if (!ctx->pkey || !ctx->peerkey) {
+        ECerr(EC_F_PKEY_EC_ENCRYPT, EC_R_KEYS_NOT_SET);
+        rv = 0;
+        goto cleanup;
+    }
     
 	/* Do a switcharoo here so that the peer key's private key is used */
 	tmp = ctx->pkey;
@@ -626,7 +631,7 @@ int pkey_ec_asym_encrypt(EVP_PKEY_CTX *ctx,
 		goto cleanup;
 	}
 
-	*outlen = derivedlen + inlen;
+	*outlen = bufSz + inlen;
 
 	// encrypt given payload
 	memxor(derived, in, inlen);
@@ -644,6 +649,107 @@ int pkey_ec_asym_encrypt(EVP_PKEY_CTX *ctx,
 	ctx->peerkey = tmp;
 
 	return rv;
+}
+
+int pkey_ec_asym_decrypt_init(EVP_PKEY_CTX *ctx) {
+	EC_PKEY_CTX *dctx = ctx->data;
+	int bufSz;
+	char *buf;
+    int rv = 1;
+
+    if (EVP_PKEY_derive_init(ctx) <= 0) {
+		rv = 0;
+		goto cleanup;
+	}
+
+    dctx->kdf_type = EVP_PKEY_ECDH_KDF_X9_63;
+	dctx->kdf_md = EVP_sha256();
+	dctx->kdf_outlen = 32;
+
+    ctx->operation = EVP_PKEY_OP_DECRYPT;
+
+	cleanup:
+	return rv;
+}
+
+int pkey_ec_asym_decrypt(EVP_PKEY_CTX *ctx,
+                     unsigned char *out, size_t *outlen,
+                     const unsigned char *in, size_t inlen) {
+    int rv = 1;
+    EVP_PKEY *peerkey = NULL;
+    EVP_PKEY *tmp = NULL;
+    unsigned char *derived = NULL;
+    size_t derivedlen = 0;
+
+    EC_PKEY_CTX *dctx = ctx->data;
+    if (ctx->pkey == NULL) {
+        ECerr(EC_F_PKEY_EC_DECRYPT, EC_R_NO_PARAMETERS_SET);
+        rv = 0;
+        goto cleanup;
+    }
+
+    EC_KEY* ec_key = ctx->pkey->pkey.ec;
+    int keysize = EC_POINT_point2oct(ec_key->group, ec_key->pub_key,
+                                 ec_key->conv_form, NULL, 0, NULL);
+
+    // this call moves the "in" pointer to the end of the key
+    peerkey = d2i_PublicKey(EVP_PKEY_EC, &ctx->pkey, &in, keysize);
+
+    if (!peerkey) {
+        rv = 0;
+        goto cleanup;
+    }
+
+    derivedlen = inlen - keysize;
+    dctx->kdf_outlen = derivedlen;
+    derived = OPENSSL_malloc(derivedlen);
+
+    if (*outlen < derivedlen) {
+        ECerr(EC_F_PKEY_EC_DECRYPT, EC_R_BUFFER_TOO_SMALL);
+        rv = 0;
+        goto cleanup;
+    }
+
+    *outlen = derivedlen;
+
+    if (EVP_PKEY_derive_set_peer(ctx, peerkey) <= 0) {
+		rv = 0;
+		goto cleanup;
+	}
+
+    /* Do a switcharoo here so that the peer key's private key is used */
+	tmp = ctx->pkey;
+	ctx->pkey = ctx->peerkey;
+	ctx->peerkey = tmp;
+
+    if (!pkey_ec_kdf_derive(ctx, derived, &derivedlen)) {
+		rv = 0;
+		goto cleanup;
+	}
+
+    if (derivedlen != *outlen) {
+        ECerr(EC_F_PKEY_EC_DECRYPT, EC_R_SHARED_INFO_ERROR);
+        rv = 0;
+        goto cleanup;
+    }
+
+    // decrypt data
+    memcpy(out, in, derivedlen);
+    memxor(out, derived, derivedlen);
+
+    cleanup:
+    if (tmp) {
+        /* undo switcharoo */
+        tmp = ctx->pkey;
+        ctx->pkey = ctx->peerkey;
+        ctx->peerkey = tmp;
+    }
+    if (derived)
+        OPENSSL_free(derived);
+    if (peerkey)
+        EVP_PKEY_free(peerkey);
+    
+    return rv;
 }
 
 static const EVP_PKEY_METHOD ec_pkey_meth = {
@@ -672,8 +778,8 @@ static const EVP_PKEY_METHOD ec_pkey_meth = {
     pkey_ec_asym_encrypt_init,
     pkey_ec_asym_encrypt,
 
-    0,
-    0,
+    pkey_ec_asym_decrypt_init,
+    pkey_ec_asym_decrypt,
 
     0,
 #ifndef OPENSSL_NO_EC

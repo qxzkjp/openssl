@@ -212,6 +212,8 @@ int ERR_load_EC_strings(void);
 #   define EC_F_PKEY_EC_CTRL                                0
 #   define EC_F_PKEY_EC_CTRL_STR                            0
 #   define EC_F_PKEY_EC_DERIVE                              0
+#   define EC_F_PKEY_EC_ENCRYPT                             0
+#   define EC_F_PKEY_EC_DECRYPT                             0
 #   define EC_F_PKEY_EC_INIT                                0
 #   define EC_F_PKEY_EC_KDF_DERIVE                          0
 #   define EC_F_PKEY_EC_KEYGEN                              0
