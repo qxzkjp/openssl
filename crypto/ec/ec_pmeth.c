@@ -47,101 +47,6 @@ typedef struct {
     size_t kdf_outlen;
 } EC_PKEY_CTX;
 
-const int block_sizes[4] = {
-	sizeof(long long int),
-	sizeof(int),
-	sizeof(short int),
-	1 //sizeof(char)
-};
-
-void memxor(void* dst, const void* src, size_t n) {
-    unsigned char *dst_c;
-    short int *dst_s;
-    int *dst_i;
-    long long int *dst_ll;
-
-    const unsigned char *src_c;
-    const short int *src_s;
-    const int *src_i;
-    const long long int *src_ll;
-
-    size_t remaining;
-
-	dst_c     = dst;
-	src_c     = src;
-	remaining = n;
-
-	for (size_t i = 0; i < sizeof(block_sizes); ++i) {
-		int block_size = block_sizes[i];
-		int dst_offset = (uintptr_t)dst % block_size;
-		int src_offset = (uintptr_t)src % block_size;
-		size_t blocks;
-		size_t remainder;
-		
-		if (dst_offset != src_offset) {
-			continue;
-		}
-
-		for (int j = 0; j < dst_offset; ++j) {
-			dst_c[j] ^= src_c[j];
-		}
-
-		remaining -= dst_offset;
-
-		blocks = remaining / block_size;
-		remainder = remaining % block_size;
-
-		switch (block_sizes[i]) {
-				case sizeof(long long int):
-					dst_ll = (long long int*)(dst_c + dst_offset);
-					src_ll = (long long int*)(src_c + dst_offset);
-				break;
-				case sizeof(int):
-					dst_i = (int*)(dst_c + dst_offset);
-					src_i = (int*)(src_c + dst_offset);
-				break;
-				case sizeof(short):
-					dst_s = (short int*)(dst_c + dst_offset);
-					src_s = (short int*)(src_c + dst_offset);
-				break;
-				case 1:
-					dst_c += dst_offset;
-					src_c += dst_offset;
-				break;
-				default:
-				exit(1);
-			}
-
-		for (size_t j = 0; j < blocks; ++j) {
-			switch (block_size) {
-				case sizeof(long long int):
-					dst_ll[j] ^= src_ll[j];
-				break;
-				case sizeof(int):
-					dst_i[j] ^= src_i[j];
-				break;
-				case sizeof(short):
-					dst_s[j] ^= src_s[j];
-				break;
-				case 1:
-					dst_c[j] ^= src_c[j];
-				break;
-				default:
-				exit(1);
-			}
-		}
-
-		dst_c = (unsigned char*)dst + (remaining - remainder);
-		src_c = (unsigned char*)src + (remaining - remainder);
-
-		for (size_t j = 0; j < remainder; ++j) {
-			dst_c[j] ^= src_c[j];
-		}
-
-		break;
-	}
-}
-
 static int pkey_ec_init(EVP_PKEY_CTX *ctx)
 {
     EC_PKEY_CTX *dctx;
@@ -449,7 +354,6 @@ static int pkey_ec_ctrl(EVP_PKEY_CTX *ctx, int type, int p1, void *p2)
     case EVP_PKEY_CTRL_PKCS7_SIGN:
     case EVP_PKEY_CTRL_CMS_SIGN:
         return 1;
-
     default:
         return -2;
 
@@ -541,10 +445,50 @@ static int pkey_ec_keygen(EVP_PKEY_CTX *ctx, EVP_PKEY *pkey)
     return ret ? EC_KEY_generate_key(ec) : 0;
 }
 
+EVP_PKEY* get_encryption_peerkey(EVP_PKEY_CTX *ctx)
+{
+    EC_PKEY_CTX *dctx = ctx->data;
+    EC_KEY *ec_peerkey = EC_KEY_new();
+	EVP_PKEY* peerkey = EVP_PKEY_new();
+
+    if (!ec_peerkey || !peerkey) {
+		goto cleanup_key;
+	}
+    
+    if (EVP_PKEY_derive_init(ctx) <= 0) {
+		goto cleanup_key;
+	}
+
+	if (!EVP_PKEY_assign_EC_KEY(peerkey, ec_peerkey)) {
+		goto cleanup_key;
+	}
+
+    int ret;
+
+    if (ctx->pkey != NULL)
+        ret = EVP_PKEY_copy_parameters(peerkey, ctx->pkey);
+    else
+        ret = EC_KEY_set_group(ec_peerkey, dctx->gen_group);
+
+    if (!ret)
+        goto cleanup;
+
+    if (!EC_KEY_generate_key(ec_peerkey)) {
+		goto cleanup;
+	}
+
+    return peerkey;
+
+    cleanup_key:
+    EC_KEY_free(ec_peerkey);
+    cleanup:
+    EVP_PKEY_free(peerkey);
+    return  NULL;
+}
+
 int pkey_ec_asym_encrypt_init(EVP_PKEY_CTX *ctx) {
 	EC_PKEY_CTX *dctx = ctx->data;
-	EC_KEY *ec_peerkey = EC_KEY_new();
-	EVP_PKEY* peerkey = EVP_PKEY_new();
+    EVP_PKEY *peerkey;
     int ret = 1;
 
     if (ctx->pkey == NULL && dctx->gen_group == NULL) {
@@ -553,37 +497,12 @@ int pkey_ec_asym_encrypt_init(EVP_PKEY_CTX *ctx) {
         goto cleanup;
     }
 
-    if (EVP_PKEY_derive_init(ctx) <= 0) {
-		ret = 0;
-		goto cleanup;
-	}
-
+    peerkey = get_encryption_peerkey(ctx);
     dctx->kdf_type = EVP_PKEY_ECDH_KDF_X9_63;
 	dctx->kdf_md = EVP_sha256();
 	dctx->kdf_outlen = 32;
 
-	if (!ec_peerkey) {
-		ret = 0;
-		goto cleanup;
-	}
-
-	if (!EVP_PKEY_assign_EC_KEY(peerkey, ec_peerkey)) {
-        EC_KEY_free(ec_peerkey);
-		ret = 0;
-		goto cleanup;
-	}
-
-    if (ctx->pkey != NULL)
-        ret = EVP_PKEY_copy_parameters(peerkey, ctx->pkey);
-    else
-        ret = EC_KEY_set_group(ec_peerkey, dctx->gen_group);
-
-    if (!EC_KEY_generate_key(ec_peerkey)) {
-		ret = 0;
-		goto cleanup;
-	}
-
-    if (EVP_PKEY_derive_set_peer(ctx, peerkey) <= 0) {
+    if (!peerkey || EVP_PKEY_derive_set_peer(ctx, peerkey) <= 0) {
 		ret = 0;
 		goto cleanup;
 	}
@@ -596,9 +515,52 @@ int pkey_ec_asym_encrypt_init(EVP_PKEY_CTX *ctx) {
 	return ret;
 }
 
+int get_mac_length(EVP_MAC_CTX *hmac_ctx)
+{
+    OSSL_PARAM params[3], *p = params;
+
+    /*
+     * we have to set parameters before we can get the MAC size
+     * the key we set here is a dummy, because we need the MAC size
+     * before we can generate the real key */
+    *p++ = OSSL_PARAM_construct_utf8_string(OSSL_MAC_PARAM_DIGEST, "SHA256", 0);
+    *p++ = OSSL_PARAM_construct_octet_string(OSSL_MAC_PARAM_KEY, "dummy", 5);
+    *p = OSSL_PARAM_construct_end();
+    EVP_MAC_CTX_set_params(hmac_ctx, params);
+    p = params;
+
+    return EVP_MAC_size(hmac_ctx);
+}
+
+int write_mac(EVP_MAC_CTX *ctx, void *key, size_t keylen, const unsigned char *in, size_t inlen, unsigned char *out, size_t *outlen)
+{
+    OSSL_PARAM params[3], *p = params;
+    *p++ = OSSL_PARAM_construct_utf8_string(OSSL_MAC_PARAM_DIGEST, "SHA256", 0);
+    *p++ = OSSL_PARAM_construct_octet_string(
+        OSSL_MAC_PARAM_KEY,
+        key,
+        keylen
+        );
+    *p = OSSL_PARAM_construct_end();
+    
+    if (!EVP_MAC_CTX_set_params(ctx, params))
+        return 0;
+
+    // calculate HMAC of plaintext, placing it directly into the output buffer
+    if (!EVP_MAC_init(ctx))
+        return 0;
+    if (!EVP_MAC_update(ctx, in, inlen))
+        return 0;
+    if (!EVP_MAC_final(ctx, out, outlen, *outlen))
+        return 0;
+
+    return 1;
+}
+
 int pkey_ec_asym_encrypt(EVP_PKEY_CTX *ctx,
                      unsigned char *out, size_t *outlen,
-                     const unsigned char *in, size_t inlen) {
+                     const unsigned char *in, size_t inlen)
+{
 	EC_PKEY_CTX *dctx = ctx->data;
 	EVP_PKEY *tmp = NULL;
 	int bufSz = 0;
@@ -607,13 +569,11 @@ int pkey_ec_asym_encrypt(EVP_PKEY_CTX *ctx,
 	unsigned char *derived = NULL;
 	size_t derivedlen = 0;
     int hmac_keylen = 32;
-    int hashlen = 0;
-    size_t actual_hashlen = 0;
-    EVP_MAC *hmac = NULL;
-    EVP_MAC_CTX *hmac_ctx = NULL;
-    OSSL_PARAM params[3], *p = params;
+    int maclen = 0;
+    size_t output_maclen = 0;
+    EVP_MAC *hmac = EVP_MAC_fetch(NULL, "HMAC", NULL);
+    EVP_MAC_CTX *hmac_ctx = EVP_MAC_CTX_new(hmac);
 
-    hmac = EVP_MAC_fetch(NULL, "HMAC", NULL);
 	derivedlen = inlen + hmac_keylen;
 	dctx->kdf_outlen = derivedlen;
 	derived = OPENSSL_malloc(derivedlen);
@@ -625,17 +585,8 @@ int pkey_ec_asym_encrypt(EVP_PKEY_CTX *ctx,
         goto cleanup;
     }
 
-    hmac_ctx = EVP_MAC_CTX_new(hmac);
-
-    // we have to set parameters before we can get the MAC size
-    // the key we set here is a dummy, because we need the MAC size before we can generate the real key
-    *p++ = OSSL_PARAM_construct_utf8_string(OSSL_MAC_PARAM_DIGEST, "SHA256", 0);
-    *p++ = OSSL_PARAM_construct_octet_string(OSSL_MAC_PARAM_KEY, "dummy", 5);
-    *p = OSSL_PARAM_construct_end();
-    EVP_MAC_CTX_set_params(hmac_ctx, params);
-    p = params;
-
-    hashlen = EVP_MAC_size(hmac_ctx);
+    maclen = get_mac_length(hmac_ctx);
+    output_maclen = maclen;
 
     if (!ctx->pkey || !ctx->peerkey) {
         ECerr(EC_F_PKEY_EC_ENCRYPT, EC_R_KEYS_NOT_SET);
@@ -643,7 +594,7 @@ int pkey_ec_asym_encrypt(EVP_PKEY_CTX *ctx,
         goto cleanup;
     }
 
-    if (bufSz + inlen + hashlen > *outlen) {
+    if (bufSz + inlen + maclen > *outlen) {
         ECerr(EC_F_PKEY_EC_DECRYPT, EC_R_BUFFER_TOO_SMALL);
 		ret = 0;
 		goto cleanup;
@@ -663,38 +614,22 @@ int pkey_ec_asym_encrypt(EVP_PKEY_CTX *ctx,
 		goto cleanup;
 	}
 
-	*outlen = bufSz + inlen + hashlen;
+	*outlen = bufSz + inlen + maclen;
 
-	// encrypt given payload
-	memxor(derived, in, inlen);
+	/* encrypt given payload */
+	CRYPTO_memxor(derived, in, inlen);
     memcpy(out, buf, bufSz);
 	memcpy(out + bufSz, derived, inlen);
 
-    //Now we set the real MAC parameters
-    *p++ = OSSL_PARAM_construct_utf8_string(OSSL_MAC_PARAM_DIGEST, "SHA256", 0);
-    *p++ = OSSL_PARAM_construct_octet_string(
-        OSSL_MAC_PARAM_KEY,
-        derived + inlen,
-        hmac_keylen
-        );
-    *p = OSSL_PARAM_construct_end();
-    EVP_MAC_CTX_set_params(hmac_ctx, params);
-    // calculate HMAC of plaintext, placing it directly into the output buffer
-    EVP_MAC_init(hmac_ctx);
-    EVP_MAC_update(hmac_ctx, in, inlen);
-    EVP_MAC_final(hmac_ctx, out + bufSz + inlen, &actual_hashlen, hashlen);
-
-    OPENSSL_assert(hashlen == actual_hashlen);
+    write_mac(hmac_ctx, derived + inlen, hmac_keylen, in, inlen, out + bufSz +inlen, &output_maclen);
+    OPENSSL_assert(maclen == output_maclen);
 
 	ret = 1;
 
 	cleanup:
-    if (hmac)
-        EVP_MAC_free(hmac);
-    
-    if (hmac_ctx)
-        EVP_MAC_CTX_free(hmac_ctx);
 
+    EVP_MAC_free(hmac);
+    EVP_MAC_CTX_free(hmac_ctx);
     OPENSSL_free(derived);
     OPENSSL_free(buf);
     
@@ -706,7 +641,8 @@ int pkey_ec_asym_encrypt(EVP_PKEY_CTX *ctx,
 	return ret;
 }
 
-int pkey_ec_asym_decrypt_init(EVP_PKEY_CTX *ctx) {
+int pkey_ec_asym_decrypt_init(EVP_PKEY_CTX *ctx)
+{
 	EC_PKEY_CTX *dctx = ctx->data;
     int ret = 1;
 
@@ -727,20 +663,20 @@ int pkey_ec_asym_decrypt_init(EVP_PKEY_CTX *ctx) {
 
 int pkey_ec_asym_decrypt(EVP_PKEY_CTX *ctx,
                      unsigned char *out, size_t *outlen,
-                     const unsigned char *in, size_t inlen) {
+                     const unsigned char *in, size_t inlen)
+{
     int ret = 0;
     EVP_PKEY *peerkey = NULL;
     EVP_PKEY *tmp = NULL;
     EC_PKEY_CTX *dctx = ctx->data;
     EVP_MAC *hmac = NULL;
     EVP_MAC_CTX *hmac_ctx = NULL;
-    OSSL_PARAM params[3], *p = params;
     unsigned char *derived = NULL;
-    unsigned char* md;
+    unsigned char* mac;
     size_t derivedlen = 0;
     int hmac_keylen = 32;
-    size_t md_len = 0;
-    int hashlen = 0;
+    size_t maclen_out = 0;
+    int maclen = 0;
 
     hmac = EVP_MAC_fetch(NULL, "HMAC", NULL);
 	derivedlen = inlen + hmac_keylen;
@@ -753,25 +689,16 @@ int pkey_ec_asym_decrypt(EVP_PKEY_CTX *ctx,
         goto cleanup;
     }
 
-    hmac_ctx = EVP_MAC_CTX_new(hmac);
-
-    // we have to set parameters before we can get the MAC size
-    // the key we set here is a dummy, because we need the MAC size 
-    // before we can generate the real key
-    *p++ = OSSL_PARAM_construct_utf8_string(OSSL_MAC_PARAM_DIGEST, "SHA256", 0);
-    *p++ = OSSL_PARAM_construct_octet_string(OSSL_MAC_PARAM_KEY, "dummy", 5);
-    *p = OSSL_PARAM_construct_end();
-    EVP_MAC_CTX_set_params(hmac_ctx, params);
-    p = params;
-
-    hashlen = EVP_MAC_size(hmac_ctx);
-    md = OPENSSL_malloc(hashlen);
-
     if (ctx->pkey == NULL) {
         ECerr(EC_F_PKEY_EC_DECRYPT, EC_R_NO_PARAMETERS_SET);
         ret = 0;
         goto cleanup;
     }
+
+    hmac_ctx = EVP_MAC_CTX_new(hmac);
+    maclen = get_mac_length(hmac_ctx);
+    maclen_out = maclen;
+    mac = OPENSSL_malloc(maclen);
 
     EC_KEY* ec_key = ctx->pkey->pkey.ec;
     int keysize = EC_POINT_point2oct(ec_key->group, ec_key->pub_key,
@@ -789,13 +716,13 @@ int pkey_ec_asym_decrypt(EVP_PKEY_CTX *ctx,
     dctx->kdf_outlen = derivedlen;
     derived = OPENSSL_malloc(derivedlen);
 
-    if (*outlen < derivedlen - hashlen) {
+    if (*outlen < derivedlen - maclen) {
         ECerr(EC_F_PKEY_EC_DECRYPT, EC_R_BUFFER_TOO_SMALL);
         ret = 0;
         goto cleanup;
     }
 
-    *outlen = derivedlen - hashlen;
+    *outlen = derivedlen - maclen;
 
     if (EVP_PKEY_derive_set_peer(ctx, peerkey) <= 0) {
 		ret = 0;
@@ -820,25 +747,12 @@ int pkey_ec_asym_decrypt(EVP_PKEY_CTX *ctx,
 
     // decrypt data
     memcpy(out, in, *outlen);
-    memxor(out, derived, *outlen);
+    CRYPTO_memxor(out, derived, *outlen);
 
-    //Now we set the real MAC parameters
-    *p++ = OSSL_PARAM_construct_utf8_string(OSSL_MAC_PARAM_DIGEST, "SHA256", 0);
-    *p++ = OSSL_PARAM_construct_octet_string(
-        OSSL_MAC_PARAM_KEY,
-        derived + *outlen,
-        hmac_keylen
-        );
-    *p = OSSL_PARAM_construct_end();
-    EVP_MAC_CTX_set_params(hmac_ctx, params);
-    // calculate HMAC of plaintext, placing it directly into the output buffer
-    EVP_MAC_init(hmac_ctx);
-    EVP_MAC_update(hmac_ctx, out, *outlen);
-    EVP_MAC_final(hmac_ctx, md, &md_len, hashlen);
+    write_mac(hmac_ctx, derived + *outlen, hmac_keylen, out, *outlen, mac, &maclen_out);
+    OPENSSL_assert(maclen_out == maclen);
 
-    OPENSSL_assert(md_len == hashlen);
-
-    if (CRYPTO_memcmp(in + *outlen, md, hashlen) != 0)
+    if (CRYPTO_memcmp(in + *outlen, mac, maclen) != 0)
     {
         ECerr(EC_F_PKEY_EC_DECRYPT, EC_R_INVALID_DIGEST);
         memset(out, 0, *outlen);
@@ -855,16 +769,12 @@ int pkey_ec_asym_decrypt(EVP_PKEY_CTX *ctx,
         ctx->pkey = ctx->peerkey;
         ctx->peerkey = tmp;
     }
-    if (hmac)
-        EVP_MAC_free(hmac); 
-    if (hmac_ctx)
-        EVP_MAC_CTX_free(hmac_ctx);
-    if (derived)
-        OPENSSL_free(derived);
-    if (peerkey)
-        EVP_PKEY_free(peerkey);
-    if (md)
-        OPENSSL_free(md);
+
+    EVP_MAC_free(hmac); 
+    EVP_MAC_CTX_free(hmac_ctx);
+    OPENSSL_free(derived);
+    EVP_PKEY_free(peerkey);
+    OPENSSL_free(mac);
     return ret;
 }
 

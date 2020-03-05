@@ -400,6 +400,8 @@ int OPENSSL_gmtime_diff(int *pday, int *psec,
  */
 int CRYPTO_memcmp(const void * in_a, const void * in_b, size_t len);
 
+void CRYPTO_memxor(void* dst, const void* src, size_t n);
+
 /* Standard initialisation options */
 # define OPENSSL_INIT_NO_LOAD_CRYPTO_STRINGS 0x00000001L
 # define OPENSSL_INIT_LOAD_CRYPTO_STRINGS    0x00000002L

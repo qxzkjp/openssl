@@ -11,6 +11,7 @@
 #include "e_os.h"
 #include "crypto/cryptlib.h"
 #include <openssl/safestack.h>
+#include <limits.h>
 
 #if     defined(__i386)   || defined(__i386__)   || defined(_M_IX86) || \
         defined(__x86_64) || defined(__x86_64__) || \
@@ -471,3 +472,73 @@ size_t OPENSSL_instrument_bus2(unsigned int *out, size_t cnt, size_t max)
     return 0;
 }
 #endif
+
+#define CREATE_MEMXOR(type) \
+void CRYPTO_memxor_##type (void **dst, const void **src, size_t count) \
+{ \
+    type *dst_##tag = *dst; \
+    const type *src_##tag = *src; \
+\
+    for (size_t j = 0; j < count; ++j) { \
+        dst_##tag[j] ^= src_##tag[j];\
+    } \
+    *dst = dst_##tag + count; \
+    *src = src_##tag + count; \
+}
+
+CREATE_MEMXOR(char)
+CREATE_MEMXOR(uint16_t)
+CREATE_MEMXOR(uint32_t)
+CREATE_MEMXOR(uint64_t)
+
+
+void CRYPTO_memxor(void* dst, const void* src, size_t n)
+{
+    const int block_sizes[4] = {
+        sizeof(uint64_t),
+        sizeof(uint32_t),
+        sizeof(uint16_t),
+        1 //sizeof(char)
+    };
+
+    size_t remaining;
+
+	for (size_t i = 0; i < sizeof(block_sizes); ++i) {
+		int block_size = block_sizes[i];
+		int dst_offset = (uintptr_t)dst % block_size;
+		int src_offset = (uintptr_t)src % block_size;
+		size_t blocks;
+		size_t remainder;
+		
+		if (dst_offset != src_offset) {
+			continue;
+		}
+
+        CRYPTO_memxor_char(&dst, &src, dst_offset);
+
+		remaining = n - dst_offset;
+
+		blocks = remaining / block_size;
+		remainder = remaining % block_size;
+
+		switch (block_sizes[i]) {
+            case sizeof(uint64_t):
+                CRYPTO_memxor_uint64_t(&dst, &src, blocks);
+            break;
+            case sizeof(uint32_t):
+                CRYPTO_memxor_uint32_t(&dst, &src, blocks);
+            break;
+            case sizeof(uint16_t):
+                CRYPTO_memxor_uint16_t(&dst, &src, blocks);
+            break;
+            case 1:
+                CRYPTO_memxor_char(&dst, &src, blocks);
+            break;
+            default:
+            exit(1);
+        }
+
+        CRYPTO_memxor_char(&dst, &src, remainder);
+		break;
+	}
+}
