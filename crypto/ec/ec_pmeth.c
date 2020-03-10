@@ -526,7 +526,10 @@ int get_mac_length(EVP_MAC_CTX *hmac_ctx)
     *p++ = OSSL_PARAM_construct_utf8_string(OSSL_MAC_PARAM_DIGEST, "SHA256", 0);
     *p++ = OSSL_PARAM_construct_octet_string(OSSL_MAC_PARAM_KEY, "dummy", 5);
     *p = OSSL_PARAM_construct_end();
-    EVP_MAC_CTX_set_params(hmac_ctx, params);
+    
+    if (!EVP_MAC_CTX_set_params(hmac_ctx, params))
+        return 0;
+    
     p = params;
 
     return EVP_MAC_size(hmac_ctx);
@@ -586,6 +589,12 @@ int pkey_ec_asym_encrypt(EVP_PKEY_CTX *ctx,
     }
 
     maclen = get_mac_length(hmac_ctx);
+
+    if (!maclen) {
+        ret = 0;
+        goto cleanup;
+    }
+
     output_maclen = maclen;
 
     if (!ctx->pkey || !ctx->peerkey) {
@@ -621,7 +630,11 @@ int pkey_ec_asym_encrypt(EVP_PKEY_CTX *ctx,
     memcpy(out, buf, bufSz);
 	memcpy(out + bufSz, derived, inlen);
 
-    write_mac(hmac_ctx, derived + inlen, hmac_keylen, in, inlen, out + bufSz +inlen, &output_maclen);
+    if (!write_mac(hmac_ctx, derived + inlen, hmac_keylen, in, inlen, out + bufSz +inlen, &output_maclen)) {
+        ret = 0;
+        goto cleanup;
+    }
+
     OPENSSL_assert(maclen == output_maclen);
 
 	ret = 1;
@@ -697,6 +710,12 @@ int pkey_ec_asym_decrypt(EVP_PKEY_CTX *ctx,
 
     hmac_ctx = EVP_MAC_CTX_new(hmac);
     maclen = get_mac_length(hmac_ctx);
+
+    if (!maclen) {
+        ret = 0;
+        goto cleanup;
+    }
+
     maclen_out = maclen;
     mac = OPENSSL_malloc(maclen);
 
@@ -749,7 +768,11 @@ int pkey_ec_asym_decrypt(EVP_PKEY_CTX *ctx,
     memcpy(out, in, *outlen);
     CRYPTO_memxor(out, derived, *outlen);
 
-    write_mac(hmac_ctx, derived + *outlen, hmac_keylen, out, *outlen, mac, &maclen_out);
+    if (!write_mac(hmac_ctx, derived + *outlen, hmac_keylen, out, *outlen, mac, &maclen_out)) {
+        ret = 0;
+        goto cleanup;
+    }
+    
     OPENSSL_assert(maclen_out == maclen);
 
     if (CRYPTO_memcmp(in + *outlen, mac, maclen) != 0)
