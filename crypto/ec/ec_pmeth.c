@@ -45,6 +45,8 @@ typedef struct {
     size_t kdf_ukmlen;
     /* KDF output length */
     size_t kdf_outlen;
+    /* MAC to use with encryption/decryption */
+    EVP_MAC *ics_mac;
 } EC_PKEY_CTX;
 
 static int pkey_ec_init(EVP_PKEY_CTX *ctx)
@@ -100,6 +102,8 @@ static void pkey_ec_cleanup(EVP_PKEY_CTX *ctx)
     if (dctx != NULL) {
         EC_GROUP_free(dctx->gen_group);
         EC_KEY_free(dctx->co_key);
+        EVP_MD_free(dctx->kdf_md);
+        EVP_MAC_free(dctx->ics_mac);
         OPENSSL_free(dctx->kdf_ukm);
         OPENSSL_free(dctx);
         ctx->data = NULL;
@@ -501,6 +505,7 @@ int pkey_ec_asym_encrypt_init(EVP_PKEY_CTX *ctx) {
     dctx->kdf_type = EVP_PKEY_ECDH_KDF_X9_63;
 	dctx->kdf_md = EVP_sha256();
 	dctx->kdf_outlen = 32;
+    dctx->ics_mac = EVP_MAC_fetch(NULL, "HMAC", NULL);
 
     if (!peerkey || EVP_PKEY_derive_set_peer(ctx, peerkey) <= 0) {
 		ret = 0;
@@ -574,7 +579,7 @@ int pkey_ec_asym_encrypt(EVP_PKEY_CTX *ctx,
     int hmac_keylen = 32;
     int maclen = 0;
     size_t output_maclen = 0;
-    EVP_MAC *hmac = EVP_MAC_fetch(NULL, "HMAC", NULL);
+    EVP_MAC *hmac = dctx->ics_mac;
     EVP_MAC_CTX *hmac_ctx = EVP_MAC_CTX_new(hmac);
 
 	derivedlen = inlen + hmac_keylen;
@@ -641,7 +646,6 @@ int pkey_ec_asym_encrypt(EVP_PKEY_CTX *ctx,
 
 	cleanup:
 
-    EVP_MAC_free(hmac);
     EVP_MAC_CTX_free(hmac_ctx);
     OPENSSL_free(derived);
     OPENSSL_free(buf);
@@ -667,6 +671,7 @@ int pkey_ec_asym_decrypt_init(EVP_PKEY_CTX *ctx)
     dctx->kdf_type = EVP_PKEY_ECDH_KDF_X9_63;
 	dctx->kdf_md = EVP_sha256();
 	dctx->kdf_outlen = 32;
+    dctx->ics_mac = EVP_MAC_fetch(NULL, "HMAC", NULL);
 
     ctx->operation = EVP_PKEY_OP_DECRYPT;
 
@@ -682,19 +687,16 @@ int pkey_ec_asym_decrypt(EVP_PKEY_CTX *ctx,
     EVP_PKEY *peerkey = NULL;
     EVP_PKEY *tmp = NULL;
     EC_PKEY_CTX *dctx = ctx->data;
-    EVP_MAC *hmac = NULL;
+    EVP_MAC *hmac = dctx->ics_mac;
     EVP_MAC_CTX *hmac_ctx = NULL;
     unsigned char *derived = NULL;
-    unsigned char* mac;
+    unsigned char* mac = NULL;
     size_t derivedlen = 0;
     int hmac_keylen = 32;
     size_t maclen_out = 0;
     int maclen = 0;
 
     hmac = EVP_MAC_fetch(NULL, "HMAC", NULL);
-	derivedlen = inlen + hmac_keylen;
-	dctx->kdf_outlen = derivedlen;
-	derived = OPENSSL_malloc(derivedlen);
 
     if (!hmac) {
         ECerr(EC_F_PKEY_EC_ENCRYPT, EC_R_INVALID_DIGEST_TYPE);
@@ -772,7 +774,7 @@ int pkey_ec_asym_decrypt(EVP_PKEY_CTX *ctx,
         ret = 0;
         goto cleanup;
     }
-    
+
     OPENSSL_assert(maclen_out == maclen);
 
     if (CRYPTO_memcmp(in + *outlen, mac, maclen) != 0)
@@ -793,7 +795,6 @@ int pkey_ec_asym_decrypt(EVP_PKEY_CTX *ctx,
         ctx->peerkey = tmp;
     }
 
-    EVP_MAC_free(hmac); 
     EVP_MAC_CTX_free(hmac_ctx);
     OPENSSL_free(derived);
     EVP_PKEY_free(peerkey);
