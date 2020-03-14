@@ -1501,6 +1501,8 @@ int EVP_PKEY_CTX_get0_ecdh_kdf_ukm(EVP_PKEY_CTX *ctx, unsigned char **ukm);
 #  define EVP_PKEY_CTRL_SET1_ID                       (EVP_PKEY_ALG_CTRL + 11)
 #  define EVP_PKEY_CTRL_GET1_ID                       (EVP_PKEY_ALG_CTRL + 12)
 #  define EVP_PKEY_CTRL_GET1_ID_LEN                   (EVP_PKEY_ALG_CTRL + 13)
+#  define EVP_PKEY_CTRL_EC_ICS_MAC                    (EVP_PKEY_ALG_CTRL + 14)
+#  define EVP_PKEY_CTRL_GET_EC_ICS_MAC                (EVP_PKEY_ALG_CTRL + 15)
 
 /* KDF types */
 #  define EVP_PKEY_ECDH_KDF_NONE                      1

@@ -358,6 +358,12 @@ static int pkey_ec_ctrl(EVP_PKEY_CTX *ctx, int type, int p1, void *p2)
     case EVP_PKEY_CTRL_PKCS7_SIGN:
     case EVP_PKEY_CTRL_CMS_SIGN:
         return 1;
+    case EVP_PKEY_CTRL_EC_ICS_MAC:
+        dctx->ics_mac = p2;
+        return 1;
+    case EVP_PKEY_CTRL_GET_EC_ICS_MAC:
+        *(const EVP_MAC **)p2 = dctx->ics_mac;
+        return 1;
     default:
         return -2;
 
@@ -766,7 +772,7 @@ int pkey_ec_asym_decrypt(EVP_PKEY_CTX *ctx,
         goto cleanup;
     }
 
-    // decrypt data
+    /* decrypt data */
     memcpy(out, in, *outlen);
     CRYPTO_memxor(out, derived, *outlen);
 
